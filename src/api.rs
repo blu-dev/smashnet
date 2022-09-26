@@ -1,26 +1,22 @@
 use crate::types::*;
 
-extern "Rust" {
+extern "C" {
     // HttpCurl
     #[link_name = "HttpCurl__new"]
-    fn HttpCurl__new() -> Curler;
-    #[link_name = "HttpCurl__is_valid"]
-    fn HttpCurl__is_valid(curler: &Curler) -> Result<&mut Curler, u64>;
+    fn HttpCurl__new(this: *mut *mut ()) -> HttpCurlError;
+
     #[link_name = "HttpCurl__download"]
-    fn HttpCurl__download(curler: &Curler, url: String, location: String) -> Result<(), u32>;
-    #[link_name = "HttpCurl__get_json"]
-    fn HttpCurl__get_json(curler: &Curler, url: String) -> Result<String, String>;
+    fn HttpCurl__download(this: *const (), url: *const u8, url_len: usize, location: *const u8, location_len: usize) -> HttpCurlError;
+
     #[link_name = "HttpCurl__get"]
-    fn HttpCurl__get(curler: &Curler, url: String) -> Result<String, String>;
+    fn HttpCurl__get(this: *const (), url: *const u8, url_len: usize, out: *mut CurlerString) -> HttpCurlError;
+    
     #[link_name = "HttpCurl__progress_callback"]
-    fn HttpCurl__progress_callback(curler: &Curler, callback: fn(f64, f64) -> ()) -> &mut Curler;
+    fn HttpCurl__progress_callback(this: *mut (), callback: extern "C" fn(*mut u8, f64, f64), user_data: *mut u8) -> HttpCurlError;
 
     // Drop for Curler
     #[link_name = "Curler__drop"]
-    fn Curler__drop(curler: &Curler);
-
-    #[link_name = "Smashnet__get"]
-    fn Smashnet__get(url: String) -> Result<String, String>;
+    fn Curler__drop(curler: *mut ());
 }
 
 pub fn is_available() -> bool {
@@ -32,50 +28,68 @@ pub fn is_available() -> bool {
     }
 }
 
-impl HttpCurl for Curler {
-    fn new() -> Self {
-        println!("running exported new()");
+#[cfg(not(feature = "nro"))]
+impl Curler {
+    pub fn new() -> Result<Self, HttpCurlError> {
         unsafe {
-            HttpCurl__new()
+            let mut this = std::ptr::null_mut();
+            let error = HttpCurl__new(&mut this);
+            match error {
+                HttpCurlError::Ok => Ok(Self(this)),
+                err => Err(err)
+            }
         }
     }
-    fn is_valid(&mut self) -> Result<&mut Self, u64> {
-        println!("running exported is_valid()");
+
+    pub fn download(&self, url: String, location: String) -> Result<(), HttpCurlError> {
         unsafe {
-            HttpCurl__is_valid(self)
+            match HttpCurl__download(self.0, url.as_ptr(), url.len(), location.as_ptr(), location.len()) {
+                HttpCurlError::Ok => Ok(()),
+                err => Err(err)
+            }
         }
     }
-    fn download(&mut self, url: String, location: String) -> Result<(), u32> {
-        println!("running exported download()");
+
+    pub fn get(&self, url: String) -> Result<String, HttpCurlError> {
         unsafe {
-            HttpCurl__download(self, url, location)
+            let mut uninit = std::mem::MaybeUninit::uninit();
+            match HttpCurl__get(self.0, url.as_ptr(), url.len(), uninit.as_mut_ptr()) {
+                HttpCurlError::Ok => Ok(uninit.assume_init().into()),
+                err => Err(err)
+            }
         }
     }
-    fn get_json(&mut self, url: String) -> Result<String, String>{
-        println!("running exported get_json!");
-        unsafe {
-            return HttpCurl__get_json(self, url);
+
+    pub fn progress_callback<'a, F>(&mut self, callback: F) -> Result<&mut Self, HttpCurlError>
+    where
+        F: FnMut(f64, f64),
+        F: 'a
+    {
+        extern "C" fn progress_callback(closure: *mut u8, downloaded: f64, total: f64) {
+            let closure: &mut Box<dyn FnMut(f64, f64)> = unsafe { std::mem::transmute(closure) };
+            (*closure)(downloaded, total)
         }
-    }
-    fn get(&mut self, url: String) -> Result<String, String>{
-        println!("running exported get!");
         unsafe {
-            return HttpCurl__get(self, url);
-        }
-    }
-    fn progress_callback(&mut self, callback: fn(f64, f64) -> ()) -> &mut Self {
-        println!("running exported progress_callback()");
-        unsafe {
-            HttpCurl__progress_callback(self, callback)
+            // hey man if you think this is shit you should see the rust std 
+            let callback: Box<dyn FnMut(f64, f64) + 'static> = std::mem::transmute::<Box<dyn FnMut(f64, f64) + 'a>, Box<dyn FnMut(f64, f64) + 'static>>(Box::new(callback));
+            let closure = Box::new(callback);
+            let closure = Box::leak(closure);
+            match HttpCurl__progress_callback(self.0, progress_callback, closure as *mut _ as *mut u8) {
+                HttpCurlError::Ok => Ok(self),
+                err => {
+                    drop(Box::from_raw(closure as *mut Box<dyn FnMut(f64, f64)>));
+                    Err(err)
+                }
+            }
         }
     }
 }
 
+#[cfg(not(feature = "not"))]
 impl Drop for Curler {
     fn drop(&mut self) {
         unsafe {
-            println!("running exported drop()");
-            Curler__drop(self)
+            Curler__drop(self.0);
         }
     }
 }
